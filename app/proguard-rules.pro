@@ -1,0 +1,4 @@
+-keep class com.stratbot.app.** { *; }
+-dontwarn org.mozilla.**
+-dontwarn okhttp3.**
+-keep class org.mozilla.javascript.** { *; }
