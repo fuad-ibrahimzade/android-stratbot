@@ -82,12 +82,16 @@ class StrategyEditFragment : Fragment() {
         val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
         val exs = listOf("binance", "bitfinex")
         exSpin = Spinner(ctx).apply {
-            adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, exs)
+            // ArrayAdapter keeps the list it is given *by reference* and clear()/addAll()
+            // mutate it in place — so an adapter may only ever own a private, mutable copy.
+            // Sharing the immutable listOf() (or Tf.ALL below) crashes with
+            // UnsupportedOperationException when the list is refreshed.
+            adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, ArrayList(exs))
             setSelection(exs.indexOf(existing.exchange).coerceAtLeast(0))
         }
         val tfOpts = Tf.supportedFor(existing.exchange)
         tfSpin = Spinner(ctx).apply {
-            adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, tfOpts)
+            adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, ArrayList(tfOpts))
             setSelection(tfOpts.indexOf(existing.timeframe).coerceAtLeast(0))
         }
         row.addView(
@@ -155,6 +159,8 @@ class StrategyEditFragment : Fragment() {
         // timeframe re-selects when exchange changes
         exSpin.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, pos: Int, id2: Long) {
+                // supportedFor() hands back a fresh list and the adapter owns its own
+                // copy, so clear()/addAll() here touches nothing shared.
                 val opts = Tf.supportedFor(exs[pos])
                 @Suppress("UNCHECKED_CAST")
                 (tfSpin.adapter as ArrayAdapter<String>).let {

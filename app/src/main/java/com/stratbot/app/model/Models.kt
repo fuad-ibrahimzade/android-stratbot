@@ -4,6 +4,17 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
+/**
+ * org.json refuses non-finite numbers: JSONArray/JSONObject.put(double) throw
+ * JSONException("Forbidden numeric value") for NaN / ±Infinity. Because report
+ * serialization is best-effort, one such value (e.g. profitFactor = +Infinity when a
+ * backtest had winners but no losers) aborted the entire write and left the report on
+ * disk in its previous RUNNING state — i.e. a run that could never finish.
+ * Write every double through here instead; readers fall back to NaN via optDouble().
+ */
+internal fun JSONObject.num(name: String, value: Double): JSONObject =
+    if (value.isFinite()) put(name, value) else this
+
 enum class RunMode { BACKTEST, DRY, LIVE }
 enum class RunStatus { RUNNING, DONE, STOPPED, ERROR }
 
@@ -12,7 +23,13 @@ object Tf {
     val ALL = listOf("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "3d", "1w")
     val BITFINEX = listOf("1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w")
 
-    fun supportedFor(exchange: String): List<String> = if (exchange == "bitfinex") BITFINEX else ALL
+    /**
+     * Always a *fresh* list: spinner adapters hold a live reference to the list they were
+     * built with and refresh themselves with clear()/addAll(), which would otherwise mutate
+     * (and crash on) the shared ALL / BITFINEX singletons.
+     */
+    fun supportedFor(exchange: String): List<String> =
+        if (exchange == "bitfinex") ArrayList(BITFINEX) else ArrayList(ALL)
 
     fun toMs(tf: String): Long {
         val n = tf.dropLast(1).toLongOrNull() ?: 1L
@@ -145,9 +162,9 @@ data class Trade(
     val reason: String = "",
 ) {
     fun toJson(): JSONObject = JSONObject()
-        .put("entryTs", entryTs).put("exitTs", exitTs).put("side", side).put("qty", qty)
-        .put("entryPrice", entryPrice).put("exitPrice", exitPrice).put("pnl", pnl)
-        .put("fee", fee).put("reason", reason)
+        .put("entryTs", entryTs).put("exitTs", exitTs).put("side", side).num("qty", qty)
+        .num("entryPrice", entryPrice).num("exitPrice", exitPrice).num("pnl", pnl)
+        .num("fee", fee).put("reason", reason)
 
     companion object {
         fun fromJson(j: JSONObject) = Trade(
@@ -189,12 +206,12 @@ data class Metrics(
 ) {
     fun toJson(): JSONObject {
         val o = JSONObject()
-        o.put("startCash", startCash).put("finalEquity", finalEquity).put("pnl", pnl).put("roiPct", roiPct)
-        o.put("tradeCount", tradeCount).put("wins", wins).put("losses", losses).put("winRatePct", winRatePct)
-        o.put("profitFactor", profitFactor).put("avgTradePnl", avgTradePnl).put("bestTradePnl", bestTradePnl)
-        o.put("worstTradePnl", worstTradePnl).put("maxDrawdownPct", maxDrawdownPct).put("sharpe", sharpe)
-        o.put("maxWinStreak", maxWinStreak).put("maxLossStreak", maxLossStreak).put("fees", fees)
-        o.put("buyHoldPct", buyHoldPct).put("exposurePct", exposurePct)
+        o.num("startCash", startCash).num("finalEquity", finalEquity).num("pnl", pnl).num("roiPct", roiPct)
+            .put("tradeCount", tradeCount).put("wins", wins).put("losses", losses).num("winRatePct", winRatePct)
+            .num("profitFactor", profitFactor).num("avgTradePnl", avgTradePnl).num("bestTradePnl", bestTradePnl)
+            .num("worstTradePnl", worstTradePnl).num("maxDrawdownPct", maxDrawdownPct).num("sharpe", sharpe)
+            .put("maxWinStreak", maxWinStreak).put("maxLossStreak", maxLossStreak).num("fees", fees)
+            .num("buyHoldPct", buyHoldPct).num("exposurePct", exposurePct)
         return o
     }
 
@@ -254,7 +271,13 @@ data class Report(
     val logs: List<LogLine> = emptyList(),
 ) {
     fun summaryLine(): String {
-        val m = metrics ?: return "%s  eq %.2f".format(status.name, equity)
+        val m = metrics
+        if (m == null) {
+            // while a run is in flight the row must show movement (bars processed),
+            // otherwise a backtest looks identical to an idle dry run
+            return if (status == RunStatus.RUNNING) String.format("%s  %d bars  eq %.2f", status.name, bars, equity)
+            else String.format("%s  eq %.2f", status.name, equity)
+        }
         return String.format("%+.2f (%+.2f%%)", m.pnl, m.roiPct)
     }
 
@@ -264,12 +287,15 @@ data class Report(
         o.put("mode", mode.name).put("exchange", exchange).put("symbol", symbol).put("timeframe", timeframe)
         o.put("status", status.name).put("startedAt", startedAt).put("endedAt", endedAt)
         if (error != null) o.put("error", error)
-        o.put("bars", bars).put("lastPrice", lastPrice).put("bid", bid).put("ask", ask)
-        o.put("cash", cash).put("position", position).put("entryPrice", entryPrice)
-        o.put("equity", equity).put("fees", fees).put("openOrders", openOrders)
+        o.put("bars", bars).num("lastPrice", lastPrice).num("bid", bid).num("ask", ask)
+        o.num("cash", cash).num("position", position).num("entryPrice", entryPrice)
+        o.num("equity", equity).num("fees", fees).put("openOrders", openOrders)
         if (metrics != null) o.put("metrics", metrics.toJson())
         val cv = JSONArray()
-        curve.forEach { p -> cv.put(JSONArray().put(p[0]).put(p[1])) }
+        // a single non-finite point used to abort the whole report write
+        curve.forEach { p ->
+            if (p[0].isFinite() && p[1].isFinite()) cv.put(JSONArray().put(p[0]).put(p[1]))
+        }
         o.put("curve", cv)
         val tr = JSONArray(); trades.forEach { tr.put(it.toJson()) }; o.put("trades", tr)
         val lg = JSONArray(); logs.forEach { lg.put(it.toJson()) }; o.put("logs", lg)

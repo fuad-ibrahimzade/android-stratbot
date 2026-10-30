@@ -7,6 +7,7 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.stratbot.app.model.Metrics
 import com.stratbot.app.model.Report
+import com.stratbot.app.model.RunStatus
 import com.stratbot.app.model.Strategy
 import org.json.JSONObject
 import java.io.File
@@ -135,24 +136,73 @@ class StrategyStore(private val ctx: Context) {
 /** Run snapshots under filesDir/runs/<runId>/report.json  */
 class RunStore(private val ctx: Context) {
     private val root: File get() = File(ctx.filesDir, "runs").apply { mkdirs() }
+    private val lock = Any()
+    private val statusRe = Regex("\"status\"\\s*:\\s*\"(\\w+)\"")
 
     fun dirFor(runId: String) = File(root, runId).apply { mkdirs() }
 
+    /**
+     * Written from the engine thread, the maintenance timer and the UI, so it is
+     * serialised and staged through a temp file — a partially written report.json is
+     * unreadable and would make the run vanish from the list.
+     *
+     * Failures are logged rather than swallowed: silently losing the terminal snapshot
+     * is what used to leave a finished backtest on disk as RUNNING forever.
+     */
     fun write(report: Report) {
-        runCatching {
-            val d = dirFor(report.runId)
-            File(d, "report.json").writeText(report.toJson().toString())
+        // serialised outside the lock: json is a pure function of the snapshot
+        val json = try {
+            report.toJson().toString()
+        } catch (t: Throwable) {
+            Log.e("StratBot", "report serialisation failed for ${report.runId}: ${t.message}")
+            return
+        }
+        try {
+            synchronized(lock) {
+                val d = dirFor(report.runId)
+                val target = File(d, "report.json")
+                // a finished run must never be overwritten by a stale RUNNING snapshot
+                val onDisk = readStatus(target)
+                if (report.status == RunStatus.RUNNING &&
+                    (onDisk == RunStatus.DONE || onDisk == RunStatus.STOPPED || onDisk == RunStatus.ERROR)
+                ) return
+                val tmp = File(d, "report.json.tmp")
+                tmp.writeText(json)
+                if (!tmp.renameTo(target)) {
+                    target.writeText(json)
+                    tmp.delete()
+                }
+            }
+        } catch (t: Throwable) {
+            Log.e("StratBot", "report write failed for ${report.runId}: ${t.message}")
         }
     }
 
-    /** newest first */
+    /** status of an already stored report, without parsing the whole (large) file */
+    private fun readStatus(f: File): RunStatus? {
+        return try {
+            if (!f.exists()) return null
+            val buf = ByteArray(64 * 1024)
+            val n = f.inputStream().use { it.read(buf) }
+            val token = if (n > 0) statusRe.find(String(buf, 0, n))?.groupValues?.get(1) else null
+            token?.let { runCatching { RunStatus.valueOf(it) }.getOrNull() }
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    /** newest first — parses at most [limit] files, newest on disk first */
     fun listReports(limit: Int = 100): List<Report> {
         val dirs = root.listFiles { f -> f.isDirectory } ?: return emptyList()
         return dirs.mapNotNull { d ->
             val f = File(d, "report.json")
-            if (!f.exists()) return@mapNotNull null
-            runCatching { Report.fromJson(JSONObject(f.readText())) }.getOrNull()
-        }.sortedByDescending { it.startedAt }.take(limit)
+            if (f.exists()) f else null
+        }.sortedByDescending { it.lastModified() }
+            .asSequence()
+            .mapNotNull { f -> runCatching { Report.fromJson(JSONObject(f.readText())) }.getOrNull() }
+            .take(limit)
+            .sortedByDescending { it.startedAt }
+            .toList()
     }
 
     fun read(runId: String): Report? = runCatching {

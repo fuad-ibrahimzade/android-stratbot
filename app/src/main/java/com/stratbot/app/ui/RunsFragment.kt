@@ -172,10 +172,11 @@ class RunsFragment : Fragment() {
 
             val bar = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, Ui.dp(ctx, 6), 0, 0) }
             bar.addView(Ui.button(ctx, "Open report") {
-                parentFragmentManager.beginTransaction()
-                    .replace(((view as? ViewGroup) ?: return@button).id, ReportFragment.newInstance(r.runId))
-                    .addToBackStack(null)
-                    .commit()
+                // `view` here is Fragment.getView() — the root layout, whose id is
+                // View.NO_ID — so replacing into it throws
+                // "No view found for id 0xffffffff" and crashes the app.
+                // Navigate exactly like the row click does.
+                (activity as? MainActivity)?.push(ReportFragment.newInstance(r.runId))
             })
             if (r.status == RunStatus.RUNNING || r.status == RunStatus.ERROR) {
                 bar.addView(Ui.button(ctx, "Stop") { RunManager.stop(r.runId) })

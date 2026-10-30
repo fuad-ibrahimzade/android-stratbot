@@ -3,10 +3,12 @@ package com.stratbot.app.runner
 import android.app.Application
 import android.util.Log
 import com.stratbot.app.data.Services
+import com.stratbot.app.model.LogLine
 import com.stratbot.app.model.Report
 import com.stratbot.app.model.RunMode
 import com.stratbot.app.model.RunSpec
 import com.stratbot.app.model.RunStatus
+import org.json.JSONObject
 import java.util.Timer
 import java.util.TimerTask
 import java.util.concurrent.CopyOnWriteArrayList
@@ -31,6 +33,7 @@ object RunManager {
     fun init(application: Application) {
         if (app != null) return
         app = application
+        reconcileInterruptedRuns(application)
         timer = Timer("stratbot-maintenance", true).apply {
             scheduleAtFixedRate(object : TimerTask() {
                 override fun run() {
@@ -51,6 +54,41 @@ object RunManager {
         refreshNotification(force = false)
     }
 
+    /**
+     * A report stored as RUNNING with no live session behind it (process killed mid-run,
+     * device reboot) can never leave RUNNING on its own: Stop is a no-op because there is
+     * no session, and the Delete button is hidden for RUNNING rows — the run looks stuck
+     * forever, like a dry run that never finishes.  Rewrite those as interrupted.
+     */
+    private fun reconcileInterruptedRuns(application: Application) {
+        Thread({
+            runCatching {
+                val dirs = application.filesDir.resolve("runs").listFiles { f -> f.isDirectory }
+                    ?: return@runCatching
+                for (d in dirs) {
+                    val f = d.resolve("report.json")
+                    if (!f.exists()) continue
+                    val text = runCatching { f.readText() }.getOrNull() ?: continue
+                    if (!text.contains("\"status\":\"RUNNING\"")) continue
+                    val rep = runCatching { Report.fromJson(JSONObject(text)) }.getOrNull() ?: continue
+                    if (rep.status != RunStatus.RUNNING) continue
+                    // never touch a run this process has just (re)started
+                    if (synchronized(sessions) { sessions.containsKey(rep.runId) }) continue
+                    val fixed = rep.copy(
+                        status = RunStatus.STOPPED,
+                        endedAt = maxOf(rep.endedAt, f.lastModified()),
+                        logs = rep.logs + LogLine(
+                            System.currentTimeMillis(), "W",
+                            "run interrupted: the app closed while this run was active",
+                        ),
+                    )
+                    Services.runs.write(fixed)
+                    Log.i(TAG, "reconciled interrupted run …${rep.runId.takeLast(6)}")
+                }
+            }.onFailure { Log.w(TAG, "interrupted-run reconcile: ${it.message}") }
+        }, "stratbot-reconcile").apply { isDaemon = true; start() }
+    }
+
     // ---------------- registry ----------------
 
     fun start(spec: RunSpec): RunSession {
@@ -67,6 +105,9 @@ object RunManager {
         val startMsg = "starting ${spec.mode} ${spec.exchange} ${spec.symbol} ${spec.timeframe} ${spec.runId.take(8)}"
         Log.i(TAG, startMsg)
         session.start()
+        // persist the first RUNNING snapshot immediately, so the list / notification can
+        // show the run before the first maintenance tick instead of looking inert
+        runCatching { session.publish(force = true) }
         RunnerService.start(app ?: throw IllegalStateException("app not initialised"))
         refreshNotification(force = true)
         return session
@@ -107,7 +148,7 @@ object RunManager {
     fun allReports(limit: Int = 100): List<Report> {
         val mem = HashMap<String, Report>()
         for (r in sessionReports()) mem[r.runId] = r
-        for (r in Services.runs.listReports(limit * 2)) if (!mem.containsKey(r.runId)) mem[r.runId] = r
+        for (r in Services.runs.listReports(limit)) if (!mem.containsKey(r.runId)) mem[r.runId] = r
         return mem.values.sortedByDescending { it.startedAt }.take(limit)
     }
 

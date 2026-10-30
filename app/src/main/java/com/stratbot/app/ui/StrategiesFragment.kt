@@ -230,10 +230,14 @@ class StrategiesFragment : Fragment() {
             allowShort = s.allowShort,
             feeBps = s.feeBps,
             slippageBps = s.slippageBps,
-            startCash = cash.text.toString().toDoubleOrNull() ?: 10000.0,
+            startCash = (cash.text.toString().toDoubleOrNull() ?: 10000.0).let {
+                if (it.isFinite() && it > 0) it else 10000.0
+            },
             startMs = 0,
             endMs = 0,
-            maxBars = bars.text.toString().toIntOrNull() ?: 1500,
+            // history is fetched in 1000-bar pages: an unbounded value here makes a
+            // backtest run for minutes/hours with no visible progress — clamp it
+            maxBars = (bars.text.toString().toIntOrNull() ?: 1500).coerceIn(20, 20_000),
         )
         RunManager.start(spec)
         Ui.toast(requireContext(), "${mode.name} started")

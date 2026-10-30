@@ -227,7 +227,9 @@ class ReportFragment : Fragment() {
         val pairs = listOf(
             "Max drawdown" to String.format("-%.2f%%", m.maxDrawdownPct),
             "Win rate" to String.format("%.1f%%  (%d/%d)", m.winRatePct, m.wins, m.tradeCount),
-            "Profit factor" to String.format("%.2f", m.profitFactor),
+            // profitFactor is ∞ when the run had no losing trades; it is deliberately
+            // not serialised (org.json rejects it), so it reads back as NaN — both mean ∞
+            "Profit factor" to if (m.profitFactor.isFinite()) String.format("%.2f", m.profitFactor) else "∞",
             "Sharpe (ann.)" to String.format("%.2f", m.sharpe),
             "Trades" to m.tradeCount.toString(),
             "Exposure" to String.format("%.1f%%", m.exposurePct),
